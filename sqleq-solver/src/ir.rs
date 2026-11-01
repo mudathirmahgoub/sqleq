@@ -227,6 +227,24 @@ fn check_collation(v: &Value) -> Result<(), TranslateError> {
     Ok(())
 }
 
+/// One key of an `ORDER BY`: the column, whether it sorts descending, and whether nulls come first,
+/// read off a `collation` entry `[column, type, "ASCENDING NULLS LAST"]` (see `check_collation`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortKey {
+    pub column: u32,
+    pub descending: bool,
+    pub nulls_first: bool,
+}
+
+impl SortKey {
+    fn parse(v: &Value) -> Result<SortKey, TranslateError> {
+        let arr = v.as_array().filter(|a| a.len() >= 3).ok_or(TranslateError::CollationShape)?;
+        let column = arr[0].as_u64().ok_or(TranslateError::CollationShape)? as u32;
+        let spec = arr[2].as_str().ok_or(TranslateError::CollationShape)?;
+        Ok(SortKey { column, descending: spec.starts_with("DESC"), nulls_first: spec.ends_with("FIRST") })
+    }
+}
+
 /// One `GROUP BY`/global aggregate function call. `distinct` and `operand` are both optional on the
 /// wire (`f.path("distinct")`/`f.has("operand")` in `IrToRel.agg()`), defaulting to `false`/`[]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,8 +285,9 @@ pub enum Relation {
     Project { source: Box<Relation>, target: Vec<Expr> },
     Join { left: Box<Relation>, right: Box<Relation>, kind: JoinKind, condition: Expr },
     Group { source: Box<Relation>, keys: Vec<Expr>, function: Vec<AggCall> },
-    /// A sort's keys are checked when parsed (see `check_collation`) and not kept.
-    Sort { source: Box<Relation>, offset: Option<Expr>, limit: Option<Expr> },
+    /// A sort's keys are checked when parsed (see `check_collation`) and kept, in clause order, for a
+    /// prover that encodes a row slice.
+    Sort { source: Box<Relation>, offset: Option<Expr>, limit: Option<Expr>, keys: Vec<SortKey> },
     Values { schema: Vec<Type>, content: Vec<Vec<Expr>> },
     Union([Box<Relation>; 2]),
     Except([Box<Relation>; 2]),
@@ -334,10 +353,12 @@ impl Relation {
         }
         if let Some(x) = o.get("sort") {
             let source = Relation::parse(field(x, "source")?, schema_count)?;
-            array(field(x, "collation")?)?.iter().try_for_each(check_collation)?;
+            let collation = array(field(x, "collation")?)?;
+            collation.iter().try_for_each(check_collation)?;
+            let keys = collation.iter().map(SortKey::parse).collect::<Result<_, _>>()?;
             let offset = opt_expr(x, "offset", schema_count)?;
             let limit = opt_expr(x, "limit", schema_count)?;
-            return Ok(Relation::Sort { source: Box::new(source), offset, limit });
+            return Ok(Relation::Sort { source: Box::new(source), offset, limit, keys });
         }
         if let Some(x) = o.get("values") {
             let schema = array(field(x, "schema")?)?

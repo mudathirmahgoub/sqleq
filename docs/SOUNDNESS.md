@@ -38,7 +38,8 @@ from a long chain such as `a + a + … + a`, is refused before any pass recurses
 `INTERSECT ALL` and `EXCEPT ALL` keep multiplicities, so they have IR nodes of their own,
 `intersectAll` and `exceptAll`, apart from the set operations `intersect` and `except`: a prover over
 sets refuses them (`sqleq-solver` answers unsupported; QED is not handed such a plan, and answers
-`no-plan`).
+`no-plan`), and the cvc5 axis states them over bags as `bag.inter_min` and
+`bag.difference_subtract`.
 
 Two constructs that turn on an ordering are lowered rather than refused. A row slice — `LIMIT`,
 `OFFSET`, `FETCH FIRST` — becomes the prover's `Sort` node, carrying the whole `ORDER BY` in clause
