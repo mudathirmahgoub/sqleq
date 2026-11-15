@@ -263,7 +263,7 @@ subprocess, and the heavier ones are opt-in workspace members, each built with `
   needs no Mathlib.
 * **`sqleq-cvc5`** — `sh tools/build_cvc5.sh`, once. It needs the bag reasoning of a cvc5 branch
   that no release has yet ([`bags-algebra`](https://github.com/mudathirmahgoub/cvc5/pull/27)), so
-  the script fetches that branch at a pinned commit, builds and installs it under `target/cvc5/`
+  the script fetches that branch, merged with cvc5's main, at a pinned commit, builds and installs it under `target/cvc5/`
   (5 to 15 minutes the first time, by the cores; git, cmake, a C++17 compiler and Python 3), and then runs
   `cargo build --release -p sqleq-cvc5`. After that, `cargo build -p sqleq-cvc5` and `cargo test
   -p sqleq-cvc5` work like the other crates': `.cargo/config.toml` points `CVC5_LIB_DIR` at the
