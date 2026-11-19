@@ -348,6 +348,7 @@ and failing those the newest Nix-built `qed-prover` it can find.
 | [`docs/LEAN.md`](docs/LEAN.md) | the Lean axis: which `INSERT` pairs it proves, and under what rule |
 | [`docs/INTERNALS.md`](docs/INTERNALS.md) | module map, for reading or changing the code |
 | [`tests/pairs/README.md`](tests/pairs/README.md) | the pinned pairs: known truths, every axis's answer, and how to add one |
+| [`docs/VERIEQL.md`](docs/VERIEQL.md) | VeriEQL's 23,994 LeetCode pairs as a benchmark, and what every axis answered on them |
 | [`docs/fuzz.md`](docs/fuzz.md) | the disproving axis, and its own soundness rules |
 | [`tools/README.md`](tools/README.md) | the scripts that are not part of the crate |
 | [`CHANGELOG.md`](CHANGELOG.md) | what each release changed |

@@ -7,6 +7,8 @@
 | `sqlsolver/` | our side of the IR bridge to the JVM SQLSolver, the deprecated backup cross-check of `sqleq-solver`; `sqleq-check --sqlsolver-jvm` compiles it — see [`../docs/SQLSOLVER.md`](../docs/SQLSOLVER.md) |
 | `build_cvc5.sh` | fetches the cvc5 branch the cvc5 axis needs at a pinned commit, builds and installs it under `target/cvc5/`, and builds `sqleq-cvc5` against it; run once, then cargo builds the crate like the others — see [`../docs/CVC5.md`](../docs/CVC5.md) |
 | `lean_replay.py` | re-runs the Lean axis's proved `INSERT` pairs on a real Postgres, as an independent check — see [`../docs/LEAN.md`](../docs/LEAN.md). Python 3 (standard library only) and `psql`; never run by CI |
+| `verieql_leetcode.py` | downloads VeriEQL's 23,994 LeetCode pairs at a pinned commit and writes each as a pair file under `target/verieql/leetcode/` — see [`../docs/VERIEQL.md`](../docs/VERIEQL.md). Python 3 (standard library only); never run by CI |
+| `verieql_report.py` | summarizes `sqleq-check --jsonl` runs over those pairs beside VeriEQL's answers, and draws a cactus plot — see [`../docs/VERIEQL.md`](../docs/VERIEQL.md) |
 
 There is no harness script here. Pairs are run by [`sqleq-check`](../docs/check.md): a
 directory of `.sql` pairs or a corpus CSV (`--corpus`) in, verdicts and a CI exit code out, and the

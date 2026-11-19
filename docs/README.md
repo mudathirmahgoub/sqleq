@@ -10,6 +10,7 @@ it is useful.
 | --- | --- |
 | [check.md](check.md) | `sqleq-check`, the command you run: pair files or a corpus CSV in, per-axis answers and a CI exit code out — the flags, the pinned-pair suite, the portfolio's combined verdict, and long corpus runs. |
 | [../tests/pairs/README.md](../tests/pairs/README.md) | The pinned pairs: pairs whose truth is known, with every axis's last answer, and how to add one. |
+| [VERIEQL.md](VERIEQL.md) | VeriEQL's 23,994 LeetCode pairs as a benchmark: how to fetch and run them on every axis, how their constraints become DDL, and what each axis answered. |
 
 ## What a verdict is worth
 
