@@ -276,6 +276,24 @@ struct Encoder {
 
 const LOGIC: &str = "HO_ALL";
 
+/// How a table's keys and NOT NULL columns reach cvc5, for the experiment on the designs of
+/// `~/cvc5/slides/sql-facts-design` (`SQLEQ_CVC5_CONSTRAINTS`): as facts, assertions the rewriter
+/// rules read (the default); by construction (design F); or as quantified axioms (design G).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ConstraintMode {
+    Facts,
+    Construct,
+    Axioms,
+}
+
+fn constraint_mode() -> ConstraintMode {
+    match std::env::var("SQLEQ_CVC5_CONSTRAINTS").as_deref() {
+        Ok("construct") => ConstraintMode::Construct,
+        Ok("axioms") => ConstraintMode::Axioms,
+        _ => ConstraintMode::Facts,
+    }
+}
+
 impl Encoder {
     fn new(opts: &Options) -> R<Encoder> {
         let tm = TermManager::new();
@@ -1055,39 +1073,157 @@ impl Encoder {
         let row = self.row_sort(&s.types)?;
         let table_sort = self.table_sort(row.clone())?;
         let name = s.name.clone();
-        let t = self.tm.mk_const(table_sort.clone(), &name)?;
-        self.declarations.push(format!("(declare-const {t} {table_sort})"));
+        let width = s.types.len();
+        let not_null: Vec<bool> = (0..width).map(|j| s.nullable.get(j) == Some(&false)).collect();
+        // Only the keys Postgres enforces on every row: a unique key over a nullable column admits
+        // any number of rows holding NULL in it. Under set semantics a table cannot repeat a row in
+        // the first place, and the rest of the constraint would need cardinalities.
+        let keys: Vec<Vec<usize>> = if self.sem == Semantics::Bags {
+            s.enforced_keys().filter(|k| k.iter().all(|c| *c < width)).cloned().collect()
+        } else {
+            Vec::new()
+        };
+        let mode = constraint_mode();
+        let construct = mode == ConstraintMode::Construct
+            && self.sem == Semantics::Bags
+            && (!keys.is_empty() || not_null.iter().any(|b| *b));
+        let t = if construct {
+            self.constructed(&name, &s.types, &row, keys.first(), &not_null)?
+        } else {
+            let t = self.tm.mk_const(table_sort.clone(), &name)?;
+            self.declarations.push(format!("(declare-const {t} {table_sort})"));
+            t
+        };
         self.tables[i] = Some((name.clone(), t.clone()));
         let sorts = row.tuple_element_sorts()?;
-        // A NOT NULL column holds no null: the bag of its values has no null in it.
-        for (j, nullable) in s.nullable.iter().enumerate().take(s.types.len()) {
-            if !nullable {
-                let no_null = self.no_null_in(t.clone(), j, &sorts[j])?;
-                self.constraints.push((format!("{name}: column {j} is NOT NULL"), no_null));
-            }
-        }
-        // A key: no two rows agree on it, so its values form a set. Under set semantics a table
-        // cannot repeat a row in the first place, and the rest of the constraint would need
-        // cardinalities; Java asserts nothing there either. Only the keys Postgres enforces on
-        // every row: a unique key over a nullable column admits any number of rows holding NULL
-        // in it, which the set constraint would forbid.
-        if self.sem == Semantics::Bags {
-            for key in s.enforced_keys() {
-                if key.iter().any(|c| *c >= s.types.len()) {
-                    continue;
+        match mode {
+            ConstraintMode::Axioms => self.axioms(&name, &t, &row, &keys, &not_null)?,
+            _ => {
+                // A NOT NULL column holds no null: the bag of its values has no null in it. Built
+                // into the table under `construct`.
+                for (j, nn) in not_null.iter().enumerate() {
+                    if *nn && !construct {
+                        let no_null = self.no_null_in(t.clone(), j, &sorts[j])?;
+                        self.constraints.push((format!("{name}: column {j} is NOT NULL"), no_null));
+                    }
                 }
-                let idx: Vec<u32> = key.iter().map(|c| *c as u32).collect();
-                let projection = self.project(&idx, t.clone())?;
-                let set = self.distinct(projection.clone())?;
-                let distinct = self.tm.mk_term(Kind::Equal, &[set, projection])?;
-                let cols: Vec<String> = key.iter().map(|c| c.to_string()).collect();
-                self.constraints.push((
-                    format!("{name}: key ({}): no two rows agree on it, so its values form a set", cols.join(", ")),
-                    distinct,
-                ));
+                // A key: no two rows agree on it, so its values form a set. The first one is
+                // built into the table under `construct`.
+                for (k, key) in keys.iter().enumerate() {
+                    if construct && k == 0 {
+                        continue;
+                    }
+                    let idx: Vec<u32> = key.iter().map(|c| *c as u32).collect();
+                    let projection = self.project(&idx, t.clone())?;
+                    let set = self.distinct(projection.clone())?;
+                    let distinct = self.tm.mk_term(Kind::Equal, &[set, projection])?;
+                    let cols: Vec<String> = key.iter().map(|c| c.to_string()).collect();
+                    self.constraints.push((
+                        format!("{name}: key ({}): no two rows agree on it, so its values form a set", cols.join(", ")),
+                        distinct,
+                    ));
+                }
             }
         }
         Ok(Rel { term: t })
+    }
+
+    /// Design F, the constraints by construction (`SQLEQ_CVC5_CONSTRAINTS=construct`): a NOT NULL
+    /// column has the plain sort below the table, and a table with a key is a map over a set of
+    /// keys, the other columns functions of the key:
+    ///   `(bag.map (lambda ((k K)) (tuple (nullable.some k.0) (T__c1 k) ..)) (bag.setof T__keys))`
+    /// With no key, `(bag.map (lambda ((k R)) (tuple (nullable.some k.0) k.1 ..)) T__rows)`.
+    fn constructed(&mut self, name: &str, types: &[Type], row: &Sort, key: Option<&Vec<usize>>, not_null: &[bool]) -> R<Term> {
+        let sorts = row.tuple_element_sorts()?;
+        let plain: Vec<Sort> = (0..types.len())
+            .map(|j| if not_null[j] { self.base_sort(types[j]) } else { sorts[j].clone() })
+            .collect();
+        let mut cells = Vec::with_capacity(types.len());
+        let (k, source) = if let Some(key) = key {
+            let ksorts: Vec<Sort> = key.iter().map(|&c| plain[c].clone()).collect();
+            let ksort = self.tm.mk_tuple_sort(&ksorts)?;
+            let bag = self.tm.mk_bag_sort(ksort.clone())?;
+            let keys_name = format!("{name}__keys");
+            let set = self.tm.mk_const(bag.clone(), &keys_name)?;
+            self.declarations.push(format!("(declare-const {set} {bag})"));
+            let k = self.var(ksort.clone(), "k")?;
+            for j in 0..types.len() {
+                let v = if let Some(p) = key.iter().position(|c| *c == j) {
+                    self.select(k.clone(), p)?
+                } else {
+                    let fname = format!("{name}__c{j}");
+                    let g = self.solver.declare_fun(&fname, &[ksort.clone()], plain[j].clone())?;
+                    self.declarations.push(format!("(declare-fun {g} ({ksort}) {})", plain[j]));
+                    self.apply(g, &[k.clone()])?
+                };
+                cells.push(if not_null[j] { self.some(v)? } else { v });
+            }
+            (k, self.tm.mk_term(Kind::BagSetof, &[set])?)
+        } else {
+            let rsort = self.tm.mk_tuple_sort(&plain)?;
+            let bag = self.tm.mk_bag_sort(rsort.clone())?;
+            let rows_name = format!("{name}__rows");
+            let rows = self.tm.mk_const(bag.clone(), &rows_name)?;
+            self.declarations.push(format!("(declare-const {rows} {bag})"));
+            let k = self.var(rsort, "k")?;
+            for j in 0..types.len() {
+                let v = self.select(k.clone(), j)?;
+                cells.push(if not_null[j] { self.some(v)? } else { v });
+            }
+            (k, rows)
+        };
+        let body = self.tm.mk_tuple(&cells)?;
+        let f = self.lambda(&[k], body)?;
+        Ok(self.tm.mk_term(Kind::BagMap, &[f, source])?)
+    }
+
+    /// Design G, the constraints as quantified axioms (`SQLEQ_CVC5_CONSTRAINTS=axioms`):
+    ///   `(forall ((r R)) (=> (bag.member r T) (nullable.is_some r.j)))` for the NOT NULL columns,
+    ///   `(forall ((r R) (s R)) (=> (and (bag.member r T) (bag.member s T) (= r.K s.K)) (= r s)))`
+    ///   and `(forall ((r R)) (<= (bag.count r T) 1))` for each key `K`.
+    fn axioms(&mut self, name: &str, t: &Term, row: &Sort, keys: &[Vec<usize>], not_null: &[bool]) -> R<()> {
+        let r = self.tm.mk_var(row.clone(), "ax_r")?;
+        let member_r = self.member(r.clone(), t.clone())?;
+        let mut cells = Vec::new();
+        for (j, nn) in not_null.iter().enumerate() {
+            if *nn {
+                let c = self.select(r.clone(), j)?;
+                cells.push(self.is_some(c)?);
+            }
+        }
+        if !cells.is_empty() {
+            let all = self.and(cells)?;
+            let body = self.tm.mk_term(Kind::Implies, &[member_r.clone(), all])?;
+            let vars = self.tm.mk_term(Kind::VariableList, &[r.clone()])?;
+            let ax = self.tm.mk_term(Kind::Forall, &[vars, body])?;
+            self.constraints.push((format!("{name}: the NOT NULL columns, an axiom"), ax));
+        }
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let s2 = self.tm.mk_var(row.clone(), "ax_s")?;
+        let member_s = self.member(s2.clone(), t.clone())?;
+        for key in keys {
+            let idx: Vec<u32> = key.iter().map(|c| *c as u32).collect();
+            let op = self.tm.mk_op(Kind::TupleProject, &idx)?;
+            let pr = self.tm.mk_term_from_op(op.clone(), &[r.clone()])?;
+            let ps = self.tm.mk_term_from_op(op, &[s2.clone()])?;
+            let same = self.tm.mk_term(Kind::Equal, &[pr, ps])?;
+            let premise = self.and(vec![member_r.clone(), member_s.clone(), same])?;
+            let eq = self.tm.mk_term(Kind::Equal, &[r.clone(), s2.clone()])?;
+            let body = self.tm.mk_term(Kind::Implies, &[premise, eq])?;
+            let vars = self.tm.mk_term(Kind::VariableList, &[r.clone(), s2.clone()])?;
+            let ax = self.tm.mk_term(Kind::Forall, &[vars, body])?;
+            let cols: Vec<String> = key.iter().map(|c| c.to_string()).collect();
+            self.constraints.push((format!("{name}: key ({}), an axiom", cols.join(", ")), ax));
+        }
+        let count = self.tm.mk_term(Kind::BagCount, &[r.clone(), t.clone()])?;
+        let one = self.tm.mk_integer(1);
+        let le = self.tm.mk_term(Kind::Leq, &[count, one])?;
+        let vars = self.tm.mk_term(Kind::VariableList, &[r])?;
+        let ax = self.tm.mk_term(Kind::Forall, &[vars, le])?;
+        self.constraints.push((format!("{name}: a table with a key repeats no row, an axiom"), ax));
+        Ok(())
     }
 
     /// `(= (bag.count (tuple null) ((_ table.project j) T)) 0)`, or under sets that the null tuple
